@@ -30,8 +30,12 @@
 */
 
 #include <Display.h>
+#include <Wire.h>
+#include "Chronodot.h"
 
 Peggy2Display Display;
+Chronodot RTC;
+DateTime now;
 
 float rate = 60.0;
 
@@ -47,35 +51,12 @@ float rate = 60.0;
 #define BUTTON_OFF_SEL 32	// s2 "off/select" button
 #define BUTTONS_CURRENT (PINC & B00011111) | ((PINB & 1)<<5)
 
-enum mode_t {MODE_RUN, MODE_SET_HRS, MODE_SET_MINS, MODE_SET_MONTHS, MODE_SET_DAYS};
-enum format_t {FORMAT_HRS_12, FORMAT_HRS_24};
-
-struct time_t {
-	uint8_t hh;
-	uint8_t mm;
-	uint8_t ss;
-	uint8_t mo;
-	uint8_t dd;
-};
-
 // Button variables
 uint32_t buttonDebounce;
 uint8_t buttonPollState;
 uint8_t buttonPollStatePrev;
 uint8_t buttonsPressed;
 uint8_t buttonsReleased;
-
-// Timer variables
-int32_t currentTime;	//the current time, so the reading stays consistant through a whole update cycle
-int32_t lastMillis;				//used to prevent a breakdown when SafeMillis() goes back to 0
-int32_t lastTimeUpdate;		//used to see when a second is up
-const int32_t oneSec=1000L;	//the length of 1 second in ms
-
-// Clock variables
-mode_t mode = MODE_RUN;
-format_t format = FORMAT_HRS_12;
-time_t time = {12, 0, 0, 1, 1};
-int8_t daysInMonth[12] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
 
 // Display variables
 uint8_t digits[15][5] =	{
@@ -116,123 +97,36 @@ void setup()
 	// Set up display
 	Display = Peggy2Display();
 	Display.SetRefreshRate(rate);
-	
-	currentTime = lastMillis = lastTimeUpdate = SafeMillis();
+
+	// Set up Chronodot
+	Wire.begin();
+	RTC.begin();
+  now = RTC.now();
+
+
+	if (!RTC.isrunning()) {
+		// following line sets the RTC to the date & time this sketch was compiled
+		RTC.adjust(DateTime(__DATE__, __TIME__));
+	}
 }
 
 void loop()
 {
-	int32_t oldticks = 0;
+//	PollButtons();
 	
-	PollButtons();
-	
-	if (mode == MODE_RUN)
-		Clock();
-	else
-		SetTime();
+	Clock();
 
   // Write time to frame buffer
   DisplayTime();
+
+  delay(250);
 }
 
 void Clock()
 {
-	//for when millis resets, this method results in a loss of less than 1 min over a year
-  lastMillis = currentTime;
-  currentTime = SafeMillis();
+	// get time from Chronodot
+  now = RTC.now();
 
-	//reset lastTimeUpdate when the timer resets
-  if (currentTime < lastTimeUpdate)
-    lastTimeUpdate -= lastMillis;
-
-	//update the time
-  if (currentTime >= (lastTimeUpdate + oneSec))
-  {
-		//update the counter
-    lastTimeUpdate += oneSec;
-
-		//get the new time
-		time.ss++;
-		if (time.ss > 59)
-		{
-			time.ss = 0;
-			time.mm++;
-			if (time.mm > 59)
-			{
-				time.mm = 0;
-				time.hh++;
-				if (time.hh > 24)
-				{
-					time.hh = 1;
-				}
-				else if (time.hh == 24)
-				{
-					time.dd++;
-					if (time.dd > daysInMonth[time.mo-1])
-					{
-						time.dd = 1;
-						time.mo++;
-						if (time.mo > 12)
-						{
-							time.mo = 1;
-						}
-					}
-				}
-			}
-		}
-  }
-
-	if (buttonsReleased & BUTTON_ANY)
-	{
-		mode = MODE_SET_HRS;
-		time.ss = 0;
-	}
-}
-
-void SetTime()
-{
-	if (buttonsReleased & BUTTON_ANY)
-	{
-		if (mode == MODE_SET_HRS)
-			mode = MODE_SET_MINS;
-		else if (mode == MODE_SET_MINS)
-			mode = MODE_SET_MONTHS;
-		else if (mode == MODE_SET_MONTHS)
-			mode = MODE_SET_DAYS;
-		else
-		{
-			mode = MODE_RUN;
-			lastTimeUpdate = SafeMillis();
-		}
-	}
-
-	if (buttonsReleased & BUTTON_OFF_SEL)
-	{
-		if (mode == MODE_SET_HRS)
-		{
-			time.hh++;
-			if (time.hh > 24)
-				time.hh = 1;
-		}
-		else if (mode == MODE_SET_MINS)
-		{
-			time.mm++;
-			if (time.mm > 59)
-				time.mm = 0;
-		}
-		else if (mode == MODE_SET_MONTHS)
-		{
-			time.mo++;
-			if (time.mo > 12)
-				time.mo = 1;
-		}
-		else if (mode == MODE_SET_DAYS)
-		{
-			time.dd++;
-			if (time.dd > ((time.mo == 2)?(29):(daysInMonth[time.mo])))
-				time.dd = 1;
-		}
-	}
 }
 
 
@@ -243,87 +137,53 @@ void DisplayTime()
 	uint8_t temp;
 	
 	// am/pm indicator
-	if ((time.hh < 12) || (time.hh == 24))
+	if ((now.hour() < 12) || (now.hour() == 24))
   	DisplayTimeDigit(CHAR_AM, 5);
 	else
   	DisplayTimeDigit(CHAR_PM, 5);	
 
-	if (mode != MODE_RUN)
-	  currentTime=SafeMillis();
-	  
+
 	// hours
-	temp = time.hh;
+	temp = now.hour();
 	if (temp > 12)
 		temp -= 12;	
 	
-	if ((mode == MODE_SET_HRS) && (currentTime%1000 >= 500))
-	{
+	if (temp > 9)
+		DisplayTimeDigit(1, 0);
+	else
 		DisplayTimeDigit(CHAR_SPACE, 0);
-		DisplayTimeDigit(CHAR_SPACE, 1);
-	}
-	else
-	{
-		if (temp > 9)
-	    DisplayTimeDigit(1, 0);
-		else
-	    DisplayTimeDigit(CHAR_SPACE, 0);
-		
-	  DisplayTimeDigit(temp%10, 1);
-	}
-	
+
+	DisplayTimeDigit(temp%10, 1);
+
 	// minutes
-	if ((mode == MODE_SET_MINS) && (currentTime%1000 >= 500))
-	{
-		DisplayTimeDigit(CHAR_SPACE, 3);
-		DisplayTimeDigit(CHAR_SPACE, 4);
-	}
-	else
-	{
-	  DisplayTimeDigit(time.mm/10, 3);
-  	DisplayTimeDigit(time.mm%10, 4);
-  }
-	
+	DisplayTimeDigit(now.minute()/10, 3);
+	DisplayTimeDigit(now.minute()%10, 4);
+
 	// blinking colon
-  if((mode == MODE_RUN) && (currentTime%1000 >= 500))
-		DisplayTimeDigit(CHAR_SPACE, 2);
-  else
+//  if((mode == MODE_RUN) && (currentTime%1000 >= 500))
+//		DisplayTimeDigit(CHAR_SPACE, 2);
+//  else
 		DisplayTimeDigit(CHAR_COLON, 2);
 		
 	// seconds
 	DisplaySeconds();
 		
 	// month
-	if ((mode == MODE_SET_MONTHS) && (currentTime%1000 >= 500))
-	{
+	if (now.month() > 9)
+		DisplayDateDigit(1, 0);
+	else
 		DisplayDateDigit(CHAR_SPACE, 0);
-		DisplayDateDigit(CHAR_SPACE, 1);
-	}
-	else
-	{
-		if (time.mo > 9)
-	    DisplayDateDigit(1, 0);
-		else
-	    DisplayDateDigit(CHAR_SPACE, 0);
-		
-	  DisplayDateDigit(time.mo%10, 1);
-	}
-	
+
+	DisplayDateDigit(now.month()%10, 1);
+
 	// day
-	if ((mode == MODE_SET_DAYS) && (currentTime%1000 >= 500))
-	{
-		DisplayDateDigit(CHAR_SPACE, 3);
-		DisplayDateDigit(CHAR_SPACE, 4);
-	}
+	if (now.day() > 9)
+		DisplayDateDigit(now.day()/10, 3);
 	else
-	{
-		if (time.dd > 9)
-	    DisplayDateDigit(time.dd/10, 3);
-		else
-	    DisplayDateDigit(CHAR_SPACE, 3);
-		
-	  DisplayDateDigit(time.dd%10, 4);
-	}
-	
+		DisplayDateDigit(CHAR_SPACE, 3);
+
+	DisplayDateDigit(now.day()%10, 4);
+
 	// slash
 	DisplayDateDigit(CHAR_SLASH, 2);
 }
@@ -332,7 +192,7 @@ void DisplaySeconds()
 {
 	uint8_t temp;
 
-	temp = time.ss%10;
+	temp = now.second()%10;
 
 	// Display 1s
 	for (uint8_t x=0; x<10; x++)
@@ -344,7 +204,7 @@ void DisplaySeconds()
 	}
 		
 	// Display 10s
-	temp = time.ss/10;
+	temp = now.second()/10;
 	
 	for (uint8_t x=1; x<=5; x++)
 	{
@@ -360,8 +220,7 @@ void DisplaySecondsBar(uint8_t digit, uint8_t xpos, uint8_t ypos, uint8_t bar)
 	uint16_t widebar;
 	
 	widebar = uint16_t(bar)<<(8-(xpos%8));
-//	widebar >>= xpos%8;
-	
+
 	if (digit)
 	{
 		Display.framebuffer[(ypos<<2)+(xpos>>3)] |= (widebar>>8);
